@@ -1,2 +1,6 @@
 streamlit
 streamlit-sortables
+sqlalchemy
+psycopg2-binary
+
+
