@@ -3,17 +3,20 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-from sqlalchemy import text
 
 import streamlit as st
+from sqlalchemy import text
 
+
+# ===================== DB =====================
 def get_conn():
+    # Streamlit Cloud -> Settings -> Secrets: DB_URL = "postgresql+psycopg2://..."
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
 
 
-# ---- Sütunlar (varyantlar) ----
+# ===================== Config =====================
 VARIANTS: List[Tuple[str, str]] = [
     ("dikey", "Dikey"),
     ("yatay", "Yatay"),
@@ -27,9 +30,8 @@ VARIANTS: List[Tuple[str, str]] = [
     ("eksik_ince_yatay", "Eksik ince yatay"),
 ]
 
-# ---- Her sütunda olacak checkbox’lar ----
 COLUMN_STEPS: List[Tuple[str, str]] = [
-    ("eserlerin_editlendi", "Eserlerin editlendi"),
+    ("eserlerin_editlendi", "Eserler editlendi"),
     ("kalite_artirildi", "Kalite - artırıldı"),
     ("urun_aciklamalari_olusturuldu", "Ürün açıklamaları oluşturuldu"),
     ("mockuplar_videolar_olusturuldu", "Mockuplar ve videolar oluşturuldu"),
@@ -37,7 +39,6 @@ COLUMN_STEPS: List[Tuple[str, str]] = [
     ("etsy_yuklendi", "Etsy'e yüklendi"),
 ]
 
-# ---- Sanatçıya özel (tek seferlik) ----
 GLOBAL_STEPS: List[Tuple[str, str]] = [
     ("research_tamamlandi", "Sanatçının satan ve popüler eserlerinin araştırılması"),
     ("eksikler_belirlendi", "Kaynaklarımız içerisinde bulunmayan popüler eserlerin tespit edilmesi"),
@@ -45,7 +46,7 @@ GLOBAL_STEPS: List[Tuple[str, str]] = [
 ]
 
 
-# ---------------- utils ----------------
+# ===================== Utils =====================
 def force_rerun() -> None:
     if hasattr(st, "rerun"):
         st.rerun()
@@ -94,11 +95,24 @@ def set_artist_all_session_state(artist_id: str, value: bool) -> None:
 
 
 def bump_sort_key() -> None:
-    """✅ Sortables component'ini zorla yeniden mount etmek için key versiyonunu artır."""
     st.session_state["artist_sort_key_v"] = int(st.session_state.get("artist_sort_key_v", 0)) + 1
 
 
-# ---------------- data model ----------------
+def _safe_json_to_dict(x) -> Dict:
+    if x is None:
+        return {}
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        try:
+            v = json.loads(x)
+            return v if isinstance(v, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+# ===================== Model =====================
 @dataclass
 class ArtistProgress:
     id: str
@@ -120,6 +134,7 @@ class ArtistProgress:
         )
 
 
+# ===================== DB CRUD =====================
 def load_data() -> Dict[str, ArtistProgress]:
     conn = get_conn()
     data: Dict[str, ArtistProgress] = {}
@@ -134,23 +149,8 @@ def load_data() -> Dict[str, ArtistProgress]:
         label = str(r["label"]).strip()
         order = int(r["order_num"])
 
-        g_in = r["global_steps"] or {}
-        if isinstance(g_in, str):
-            try:
-                g_in = json.loads(g_in)
-            except Exception:
-                g_in = {}
-        if not isinstance(g_in, dict):
-            g_in = {}
-
-        v_in = r["variants"] or {}
-        if isinstance(v_in, str):
-            try:
-                v_in = json.loads(v_in)
-            except Exception:
-                v_in = {}
-        if not isinstance(v_in, dict):
-            v_in = {}
+        g_in = _safe_json_to_dict(r["global_steps"])
+        v_in = _safe_json_to_dict(r["variants"])
 
         global_steps = empty_global_steps()
         for gk, _ in GLOBAL_STEPS:
@@ -175,7 +175,6 @@ def load_data() -> Dict[str, ArtistProgress]:
         )
 
     return data
-
 
 
 def save_data(data: Dict[str, ArtistProgress]) -> None:
@@ -207,8 +206,21 @@ def save_data(data: Dict[str, ArtistProgress]) -> None:
         session.commit()
 
 
+def delete_artist_db(artist_id: str) -> None:
+    conn = get_conn()
+    with conn.session as session:
+        session.execute(text("delete from artist_progress where id = :id"), {"id": artist_id})
+        session.commit()
 
 
+def truncate_all_db() -> None:
+    conn = get_conn()
+    with conn.session as session:
+        session.execute(text("truncate table artist_progress"))
+        session.commit()
+
+
+# ===================== Logic =====================
 def calc_done_total(ap: ArtistProgress) -> Tuple[int, int]:
     done = 0
     total = 0
@@ -224,20 +236,9 @@ def calc_done_total(ap: ArtistProgress) -> Tuple[int, int]:
     return done, total
 
 
-# ---------------- reorder (drag&drop) ----------------
-SORTABLES_OK = False
-sort_items = None
-try:
-    from streamlit_sortables import sort_items as _sort_items  # pip install streamlit-sortables
-    sort_items = _sort_items
-    SORTABLES_OK = True
-except Exception:
-    SORTABLES_OK = False
-
-
 def apply_order_from_id_list(data: Dict[str, ArtistProgress], ordered_ids: List[str]) -> bool:
     seen = set()
-    new_list = []
+    new_list: List[str] = []
     for i in ordered_ids:
         if i in data and i not in seen:
             seen.add(i)
@@ -257,26 +258,28 @@ def apply_order_from_id_list(data: Dict[str, ArtistProgress], ordered_ids: List[
     return changed
 
 
-# ---------------- UI ----------------
+# ===================== Sortables (optional) =====================
+SORTABLES_OK = False
+sort_items = None
+try:
+    from streamlit_sortables import sort_items as _sort_items  # pip install streamlit-sortables
+    sort_items = _sort_items
+    SORTABLES_OK = True
+except Exception:
+    SORTABLES_OK = False
+
+
+# ===================== UI =====================
 st.set_page_config(page_title="Listing Upload Süreç Takibi", layout="wide")
 st.title("📦 Listing Upload Süreç Takibi")
 
-# key version init
 if "artist_sort_key_v" not in st.session_state:
     st.session_state["artist_sort_key_v"] = 0
 
 data = load_data()
-with st.sidebar.expander("DB Debug", expanded=True):
-    conn = get_conn()
-    st.write("Ping:", conn.query("select 1 as ok", ttl=0))
-    st.write("Count:", conn.query("select count(*) as c from artist_progress", ttl=0))
-    st.write("Rows:", conn.query("select id, label, order_num from artist_progress order by order_num asc limit 20", ttl=0))
-
-
 
 with st.sidebar:
     st.header("➕ Sanatçı ekle")
-
     with st.form("add_artist_form", clear_on_submit=True):
         new_name = st.text_input("Sanatçı adı", placeholder="Örn: Claude Monet")
         submitted = st.form_submit_button("Ekle", use_container_width=True)
@@ -293,11 +296,7 @@ with st.sidebar:
                 ap = ArtistProgress.new(label=name, order=max_order + 1)
                 data[ap.id] = ap
                 save_data(data)
-                
-
-                # ✅ dragdrop listesi anında yeni elemanı görsün
                 bump_sort_key()
-
                 toast("Eklendi ✅")
                 force_rerun()
 
@@ -312,11 +311,8 @@ with st.sidebar:
 
         if SORTABLES_OK:
             st.caption("Sürükle-bırak ile sırala:")
-
-            # ✅ KEY VERSIONING: her değişimde component yeniden mount olur
             sort_key = f"artist_sort_{st.session_state['artist_sort_key_v']}"
 
-            # Ekranda label göster, id mapping yap
             display = [f"{a.label}  ⟦{a.id[:8]}⟧" for a in ordered]
             display_to_id = {f"{a.label}  ⟦{a.id[:8]}⟧": a.id for a in ordered}
 
@@ -328,10 +324,8 @@ with st.sidebar:
                     changed = apply_order_from_id_list(data, new_ids)
                     if changed:
                         toast("Sıra güncellendi ✅")
-                        # ✅ ana liste de anında güncellensin + component state temizlensin
                         bump_sort_key()
                         force_rerun()
-
             except Exception:
                 st.warning("Drag&drop çalışmadı. Aşağıdaki ↑ ↓ ile sırala.")
                 SORTABLES_OK = False
@@ -374,23 +368,13 @@ with st.sidebar:
     )
 
     st.divider()
-if st.button("🧨 Her şeyi sıfırla (DB)", use_container_width=True, key="btn_reset_all"):
-    conn = get_conn()
-    with conn.session as session:
-        session.execute(text("truncate table artist_progress"))
-        session.commit()
-    st.success("Sıfırlandı.")
-    st.stop()
+    if st.button("🧨 Her şeyi sıfırla (DB)", use_container_width=True, key="btn_reset_all"):
+        truncate_all_db()
+        st.success("Sıfırlandı.")
+        st.stop()
 
 
-def delete_artist_db(artist_id: str) -> None:
-    conn = get_conn()
-    with conn.session as session:
-        session.execute(text("delete from artist_progress where id = :id"), {"id": artist_id})
-        session.commit()
-
-
-# Main list
+# ======= Main list =======
 artists = list(data.values())
 
 if q.strip():
@@ -410,7 +394,6 @@ elif sort_mode == "Başlık (A→Z)":
 else:
     artists.sort(key=lambda a: calc_done_total(a)[0] / max(1, calc_done_total(a)[1]), reverse=True)
 
-# Genel ilerleme
 overall_done = 0
 overall_total = 0
 for a in artists:
@@ -426,7 +409,6 @@ if not artists:
     st.info("Liste boş. Soldan sanatçı ekleyebilirsin.")
     st.stop()
 
-# Artist cards
 for ap in artists:
     done, total = calc_done_total(ap)
     pct = 0 if total == 0 else done / total
@@ -483,21 +465,16 @@ for ap in artists:
                         force_rerun()
                 else:
                     if st.button("Onayla", key=f"btn_del_ok_{artist_id}"):
-                        # checkbox state cleanup
                         for gk, _ in GLOBAL_STEPS:
                             st.session_state.pop(checkbox_key(artist_id, None, gk), None)
                         for vk, _ in VARIANTS:
                             for sk, _ in COLUMN_STEPS:
                                 st.session_state.pop(checkbox_key(artist_id, vk, sk), None)
-                                
 
-                        # delete
+                        delete_artist_db(artist_id)
                         data.pop(artist_id, None)
-                        save_data(data)
 
-                        # ✅ dragdrop listesi anında güncellensin
                         bump_sort_key()
-
                         st.session_state.pop(f"del_confirm_{artist_id}", None)
                         toast("Silindi 🗑️")
                         force_rerun()
@@ -506,7 +483,6 @@ for ap in artists:
                         st.session_state.pop(f"del_confirm_{artist_id}", None)
                         force_rerun()
 
-        # ---- Global ----
         st.markdown("**Genel (sanatçı için tek seferlik):**")
         gcols = st.columns(3)
         changed = False
@@ -521,8 +497,6 @@ for ap in artists:
                     changed = True
 
         st.markdown("---")
-
-        # ---- Variants ----
         st.markdown("**Varyantlar:**")
         vcols = st.columns(len(VARIANTS))
 
