@@ -1,6 +1,8 @@
 streamlit
-streamlit-sortables
 sqlalchemy
-psycopg2-binary
+psycopg[binary]
+streamlit-sortables
+
+
 
 
