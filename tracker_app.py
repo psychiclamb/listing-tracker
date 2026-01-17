@@ -10,7 +10,6 @@ from typing import Dict, List, Tuple, Optional
 import streamlit as st
 
 DATA_FILE = Path("progress.json")
-PREFS_FILE = Path("ui_prefs.json")  # ✅ filtre/sıralama tercihleri burada saklanacak
 
 # ---- Sütunlar (varyantlar) ----
 VARIANTS: List[Tuple[str, str]] = [
@@ -42,20 +41,6 @@ GLOBAL_STEPS: List[Tuple[str, str]] = [
     ("eksikler_belirlendi", "Kaynaklarımız içerisinde bulunmayan popüler eserlerin tespit edilmesi"),
     ("eksikler_tamamlandi", "Eksik olduğu tespit edilen popüler eserlerin temin edilmesi"),
 ]
-
-
-# ---------------- prefs (kalıcı UI ayarları) ----------------
-def load_prefs() -> Dict[str, str]:
-    if not PREFS_FILE.exists():
-        return {}
-    try:
-        return json.loads(PREFS_FILE.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-
-
-def save_prefs(prefs: Dict[str, str]) -> None:
-    PREFS_FILE.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ---------------- utils ----------------
@@ -107,7 +92,7 @@ def set_artist_all_session_state(artist_id: str, value: bool) -> None:
 
 
 def bump_sort_key() -> None:
-    """Sortables component'ini zorla yeniden mount etmek için key versiyonunu artır."""
+    """✅ Sortables component'ini zorla yeniden mount etmek için key versiyonunu artır."""
     st.session_state["artist_sort_key_v"] = int(st.session_state.get("artist_sort_key_v", 0)) + 1
 
 
@@ -194,26 +179,6 @@ def calc_done_total(ap: ArtistProgress) -> Tuple[int, int]:
     return done, total
 
 
-def is_completed(ap: ArtistProgress) -> bool:
-    d, t = calc_done_total(ap)
-    return t > 0 and d == t
-
-
-def filter_artists(all_artists: List[ArtistProgress], q: str, filter_mode: str) -> List[ArtistProgress]:
-    res = all_artists
-
-    if q.strip():
-        qq = q.strip().lower()
-        res = [a for a in res if qq in a.label.lower()]
-
-    if filter_mode == "Sadece tamamlanmamışlar":
-        res = [a for a in res if not is_completed(a)]
-    elif filter_mode == "Sadece tamamlanmışlar":
-        res = [a for a in res if is_completed(a)]
-
-    return res
-
-
 # ---------------- reorder (drag&drop) ----------------
 SORTABLES_OK = False
 sort_items = None
@@ -225,28 +190,24 @@ except Exception:
     SORTABLES_OK = False
 
 
-def apply_subset_reorder(data: Dict[str, ArtistProgress], subset_ids_new_order: List[str]) -> bool:
-    """
-    ✅ Sadece görünen subset'i yeniden sırala.
-    Tam listede subset'in bulunduğu pozisyonlar korunur; diğerleri aynı yerde kalır.
-    """
-    full_ids = [a.id for a in sorted(data.values(), key=lambda a: a.order)]
-    subset_set = set(subset_ids_new_order)
+def apply_order_from_id_list(data: Dict[str, ArtistProgress], ordered_ids: List[str]) -> bool:
+    seen = set()
+    new_list = []
+    for i in ordered_ids:
+        if i in data and i not in seen:
+            seen.add(i)
+            new_list.append(i)
+    for i in data.keys():
+        if i not in seen:
+            new_list.append(i)
 
-    # subset'in full içindeki pozisyonlarını bul
-    positions = [i for i, _id in enumerate(full_ids) if _id in subset_set]
-    if len(positions) != len(subset_ids_new_order):
-        # beklenmeyen durum (id kaymış olabilir)
-        return False
-
-    new_full = full_ids[:]
-    for j, pos in enumerate(positions):
-        new_full[pos] = subset_ids_new_order[j]
-
-    changed = new_full != full_ids
-    if changed:
-        for idx, artist_id in enumerate(new_full, start=1):
+    changed = False
+    for idx, artist_id in enumerate(new_list, start=1):
+        if data[artist_id].order != idx:
             data[artist_id].order = idx
+            changed = True
+
+    if changed:
         save_data(data)
     return changed
 
@@ -258,15 +219,6 @@ st.title("📦 Listing Upload Süreç Takibi")
 # key version init
 if "artist_sort_key_v" not in st.session_state:
     st.session_state["artist_sort_key_v"] = 0
-
-# ✅ Kalıcı prefs yükle ve widgetlar oluşmadan session_state'e default bas
-prefs = load_prefs()
-if "search_q" not in st.session_state:
-    st.session_state["search_q"] = prefs.get("search_q", "")
-if "filter_mode" not in st.session_state:
-    st.session_state["filter_mode"] = prefs.get("filter_mode", "Hepsi")
-if "sort_mode" not in st.session_state:
-    st.session_state["sort_mode"] = prefs.get("sort_mode", "Liste sırası")
 
 data = load_data()
 
@@ -290,76 +242,40 @@ with st.sidebar:
                 data[ap.id] = ap
                 save_data(data)
 
+                # ✅ dragdrop listesi anında yeni elemanı görsün
                 bump_sort_key()
+
                 toast("Eklendi ✅")
                 force_rerun()
 
     st.divider()
-    st.header("🔎 Filtre / Sıralama")
-
-    filter_options = ["Hepsi", "Sadece tamamlanmamışlar", "Sadece tamamlanmışlar"]
-    sort_options = ["Liste sırası", "Başlık (A→Z)", "İlerleme (çok→az)"]
-
-    q = st.text_input("Ara", placeholder="monet", key="search_q")
-    filter_mode = st.selectbox(
-        "Göster",
-        filter_options,
-        index=filter_options.index(st.session_state["filter_mode"]) if st.session_state["filter_mode"] in filter_options else 0,
-        key="filter_mode",
-    )
-    sort_mode = st.selectbox(
-        "Liste görünümü sırası",
-        sort_options,
-        index=sort_options.index(st.session_state["sort_mode"]) if st.session_state["sort_mode"] in sort_options else 0,
-        key="sort_mode",
-    )
-
-    # ✅ seçimleri kalıcı kaydet (sayfa yenileyince gitmesin)
-    save_prefs(
-        {
-            "search_q": st.session_state.get("search_q", ""),
-            "filter_mode": st.session_state.get("filter_mode", "Hepsi"),
-            "sort_mode": st.session_state.get("sort_mode", "Liste sırası"),
-        }
-    )
-
-    st.divider()
-    st.header("↕️ Sıralama (filtreye göre)")
+    st.header("↕️ Sıralama")
 
     if not data:
         st.info("Liste boş. Önce sanatçı ekle.")
     else:
-        all_artists = list(data.values())
-        # ✅ sidebar sıralama da filtreye göre değişsin
-        visible = filter_artists(all_artists, q=st.session_state["search_q"], filter_mode=st.session_state["filter_mode"])
-
-        # visible ids = full order içindeki sıraları
-        full_sorted = sorted(all_artists, key=lambda a: a.order)
-        visible_ids_in_full_order = [a.id for a in full_sorted if a in visible]
-
-        # filtre değişince / arama değişince list content değişir → component'i yeniden mount et
-        sig = f"{st.session_state['filter_mode']}|{st.session_state['search_q']}|{','.join(visible_ids_in_full_order)}"
-        if st.session_state.get("__sidebar_sig") != sig:
-            st.session_state["__sidebar_sig"] = sig
-            bump_sort_key()
+        ordered = sorted(data.values(), key=lambda a: a.order)
+        ordered_ids = [a.id for a in ordered]
 
         if SORTABLES_OK:
             st.caption("Sürükle-bırak ile sırala:")
 
+            # ✅ KEY VERSIONING: her değişimde component yeniden mount olur
             sort_key = f"artist_sort_{st.session_state['artist_sort_key_v']}"
 
-            ordered_visible = [data[_id] for _id in visible_ids_in_full_order]
-            display = [f"{a.label}  ⟦{a.id[:8]}⟧" for a in ordered_visible]
-            display_to_id = {f"{a.label}  ⟦{a.id[:8]}⟧": a.id for a in ordered_visible}
+            # Ekranda label göster, id mapping yap
+            display = [f"{a.label}  ⟦{a.id[:8]}⟧" for a in ordered]
+            display_to_id = {f"{a.label}  ⟦{a.id[:8]}⟧": a.id for a in ordered}
 
             try:
                 new_display = sort_items(display, direction="vertical", key=sort_key)
                 new_ids = [display_to_id[x] for x in new_display if x in display_to_id]
 
-                if new_ids and new_ids != visible_ids_in_full_order:
-                    changed = apply_subset_reorder(data, new_ids)
+                if new_ids and new_ids != ordered_ids:
+                    changed = apply_order_from_id_list(data, new_ids)
                     if changed:
                         toast("Sıra güncellendi ✅")
+                        # ✅ ana liste de anında güncellensin + component state temizlensin
                         bump_sort_key()
                         force_rerun()
 
@@ -369,25 +285,40 @@ with st.sidebar:
 
         if not SORTABLES_OK:
             st.caption("↑ ↓ ile sırala (drag&drop için: pip install streamlit-sortables)")
-            ordered_visible = [data[_id] for _id in visible_ids_in_full_order]
-            for i, ap in enumerate(ordered_visible):
+            for i, ap in enumerate(ordered):
                 c1, c2, c3 = st.columns([6, 1, 1])
                 with c1:
                     st.write(ap.label)
                 with c2:
                     if st.button("↑", key=f"up_{ap.id}", disabled=(i == 0)):
-                        new_ids = visible_ids_in_full_order[:]
-                        new_ids[i - 1], new_ids[i] = new_ids[i], new_ids[i - 1]
-                        if apply_subset_reorder(data, new_ids):
-                            toast("Sıra güncellendi ✅")
+                        above = ordered[i - 1]
+                        ap.order, above.order = above.order, ap.order
+                        save_data(data)
+                        toast("Sıra güncellendi ✅")
                         force_rerun()
                 with c3:
-                    if st.button("↓", key=f"down_{ap.id}", disabled=(i == len(ordered_visible) - 1)):
-                        new_ids = visible_ids_in_full_order[:]
-                        new_ids[i + 1], new_ids[i] = new_ids[i], new_ids[i + 1]
-                        if apply_subset_reorder(data, new_ids):
-                            toast("Sıra güncellendi ✅")
+                    if st.button("↓", key=f"down_{ap.id}", disabled=(i == len(ordered) - 1)):
+                        below = ordered[i + 1]
+                        ap.order, below.order = below.order, ap.order
+                        save_data(data)
+                        toast("Sıra güncellendi ✅")
                         force_rerun()
+
+    st.divider()
+    st.header("🔎 Filtre / Sıralama")
+    q = st.text_input("Ara", placeholder="monet", key="search_q")
+    filter_mode = st.selectbox(
+        "Göster",
+        ["Hepsi", "Sadece tamamlanmamışlar", "Sadece tamamlanmışlar"],
+        index=0,
+        key="filter_mode",
+    )
+    sort_mode = st.selectbox(
+        "Liste görünümü sırası",
+        ["Liste sırası", "Başlık (A→Z)", "İlerleme (çok→az)"],
+        index=0,
+        key="sort_mode",
+    )
 
     st.divider()
     if st.button("🧨 Her şeyi sıfırla (progress.json sil)", use_container_width=True, key="btn_reset_all"):
@@ -396,19 +327,27 @@ with st.sidebar:
         st.success("Sıfırlandı. Sayfayı yenile.")
         st.stop()
 
+# Main list
+artists = list(data.values())
 
-# --------- Main list (aynı filtrelerle) ----------
-all_artists = list(data.values())
-artists = filter_artists(all_artists, q=st.session_state["search_q"], filter_mode=st.session_state["filter_mode"])
+if q.strip():
+    qq = q.strip().lower()
+    artists = [a for a in artists if qq in a.label.lower()]
 
-if st.session_state["sort_mode"] == "Liste sırası":
+if filter_mode != "Hepsi":
+    if filter_mode == "Sadece tamamlanmamışlar":
+        artists = [a for a in artists if calc_done_total(a)[0] < calc_done_total(a)[1]]
+    else:
+        artists = [a for a in artists if calc_done_total(a)[0] == calc_done_total(a)[1]]
+
+if sort_mode == "Liste sırası":
     artists.sort(key=lambda a: a.order)
-elif st.session_state["sort_mode"] == "Başlık (A→Z)":
+elif sort_mode == "Başlık (A→Z)":
     artists.sort(key=lambda a: a.label.lower())
 else:
     artists.sort(key=lambda a: calc_done_total(a)[0] / max(1, calc_done_total(a)[1]), reverse=True)
 
-# Genel ilerleme (filtrelenmiş listeye göre)
+# Genel ilerleme
 overall_done = 0
 overall_total = 0
 for a in artists:
@@ -417,11 +356,11 @@ for a in artists:
     overall_total += t
 
 st.progress(0 if overall_total == 0 else overall_done / overall_total)
-st.caption(f"Genel ilerleme (gösterilenler): {overall_done}/{overall_total} adım tamamlandı")
+st.caption(f"Genel ilerleme: {overall_done}/{overall_total} adım tamamlandı")
 st.markdown("---")
 
 if not artists:
-    st.info("Bu filtreye göre gösterilecek kayıt yok.")
+    st.info("Liste boş. Soldan sanatçı ekleyebilirsin.")
     st.stop()
 
 # Artist cards
@@ -481,16 +420,20 @@ for ap in artists:
                         force_rerun()
                 else:
                     if st.button("Onayla", key=f"btn_del_ok_{artist_id}"):
+                        # checkbox state cleanup
                         for gk, _ in GLOBAL_STEPS:
                             st.session_state.pop(checkbox_key(artist_id, None, gk), None)
                         for vk, _ in VARIANTS:
                             for sk, _ in COLUMN_STEPS:
                                 st.session_state.pop(checkbox_key(artist_id, vk, sk), None)
 
+                        # delete
                         data.pop(artist_id, None)
                         save_data(data)
 
+                        # ✅ dragdrop listesi anında güncellensin
                         bump_sort_key()
+
                         st.session_state.pop(f"del_confirm_{artist_id}", None)
                         toast("Silindi 🗑️")
                         force_rerun()
