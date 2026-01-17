@@ -162,6 +162,8 @@ def load_data() -> Dict[str, ArtistProgress]:
 def save_data(data: Dict[str, ArtistProgress]) -> None:
     raw = {artist_id: asdict(ap) for artist_id, ap in data.items()}
     DATA_FILE.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    toast(f"DB'ye kaydedildi ✅ ({len(data)} sanatçı)")
+
 
 
 def calc_done_total(ap: ArtistProgress) -> Tuple[int, int]:
@@ -247,6 +249,7 @@ with st.sidebar:
                 ap = ArtistProgress.new(label=name, order=max_order + 1)
                 data[ap.id] = ap
                 save_data(data)
+                
 
                 # ✅ dragdrop listesi anında yeni elemanı görsün
                 bump_sort_key()
