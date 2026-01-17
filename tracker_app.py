@@ -4,16 +4,14 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from sqlalchemy import text
 
 import streamlit as st
 
 def get_conn():
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
 
-
-DATA_FILE = Path("progress.json")
 
 # ---- Sütunlar (varyantlar) ----
 VARIANTS: List[Tuple[str, str]] = [
@@ -123,29 +121,46 @@ class ArtistProgress:
 
 
 def load_data() -> Dict[str, ArtistProgress]:
-    if not DATA_FILE.exists():
-        return {}
-
-    raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    conn = get_conn()
     data: Dict[str, ArtistProgress] = {}
 
-    for key, v in raw.items():
-        if not isinstance(v, dict):
-            continue
+    with conn.session as session:
+        rows = session.execute(
+            text("select id, label, order_num, global_steps, variants from artist_progress")
+        ).mappings().all()
 
-        artist_id = str(v.get("id", "")).strip() or str(key).strip()
-        label = str(v.get("label", "")).strip() or artist_id
-        order = int(v.get("order", 10**9))
+    for r in rows:
+        artist_id = str(r["id"]).strip()
+        label = str(r["label"]).strip()
+        order = int(r["order_num"])
 
-        global_in = dict(v.get("global_steps", {}))
+        g_in = r["global_steps"] or {}
+        if isinstance(g_in, str):
+            try:
+                g_in = json.loads(g_in)
+            except Exception:
+                g_in = {}
+        if not isinstance(g_in, dict):
+            g_in = {}
+
+        v_in = r["variants"] or {}
+        if isinstance(v_in, str):
+            try:
+                v_in = json.loads(v_in)
+            except Exception:
+                v_in = {}
+        if not isinstance(v_in, dict):
+            v_in = {}
+
         global_steps = empty_global_steps()
         for gk, _ in GLOBAL_STEPS:
-            global_steps[gk] = bool(global_in.get(gk, False))
+            global_steps[gk] = bool(g_in.get(gk, False))
 
-        variants_in = dict(v.get("variants", {}))
         variants: Dict[str, Dict[str, bool]] = {}
         for vk, _ in VARIANTS:
-            steps_in = dict(variants_in.get(vk, {}))
+            steps_in = v_in.get(vk, {})
+            if not isinstance(steps_in, dict):
+                steps_in = {}
             steps = empty_variant_steps()
             for sk, _ in COLUMN_STEPS:
                 steps[sk] = bool(steps_in.get(sk, False))
@@ -159,14 +174,38 @@ def load_data() -> Dict[str, ArtistProgress]:
             variants=variants,
         )
 
-    save_data(data)  # normalize
     return data
 
 
+
 def save_data(data: Dict[str, ArtistProgress]) -> None:
-    raw = {artist_id: asdict(ap) for artist_id, ap in data.items()}
-    DATA_FILE.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-    toast(f"DB'ye kaydedildi ✅ ({len(data)} sanatçı)")
+    conn = get_conn()
+
+    upsert_sql = text("""
+        insert into artist_progress (id, label, order_num, global_steps, variants, updated_at)
+        values (:id, :label, :order_num, cast(:global_steps as jsonb), cast(:variants as jsonb), now())
+        on conflict (id) do update set
+            label = excluded.label,
+            order_num = excluded.order_num,
+            global_steps = excluded.global_steps,
+            variants = excluded.variants,
+            updated_at = now()
+    """)
+
+    with conn.session as session:
+        for ap in data.values():
+            session.execute(
+                upsert_sql,
+                {
+                    "id": ap.id,
+                    "label": ap.label,
+                    "order_num": ap.order,
+                    "global_steps": json.dumps(ap.global_steps, ensure_ascii=False),
+                    "variants": json.dumps(ap.variants, ensure_ascii=False),
+                },
+            )
+        session.commit()
+
 
 
 
@@ -335,11 +374,21 @@ with st.sidebar:
     )
 
     st.divider()
-    if st.button("🧨 Her şeyi sıfırla (progress.json sil)", use_container_width=True, key="btn_reset_all"):
-        if DATA_FILE.exists():
-            DATA_FILE.unlink()
-        st.success("Sıfırlandı. Sayfayı yenile.")
-        st.stop()
+if st.button("🧨 Her şeyi sıfırla (DB)", use_container_width=True, key="btn_reset_all"):
+    conn = get_conn()
+    with conn.session as session:
+        session.execute(text("truncate table artist_progress"))
+        session.commit()
+    st.success("Sıfırlandı.")
+    st.stop()
+
+
+def delete_artist_db(artist_id: str) -> None:
+    conn = get_conn()
+    with conn.session as session:
+        session.execute(text("delete from artist_progress where id = :id"), {"id": artist_id})
+        session.commit()
+
 
 # Main list
 artists = list(data.values())
@@ -440,6 +489,7 @@ for ap in artists:
                         for vk, _ in VARIANTS:
                             for sk, _ in COLUMN_STEPS:
                                 st.session_state.pop(checkbox_key(artist_id, vk, sk), None)
+                                
 
                         # delete
                         data.pop(artist_id, None)
