@@ -234,6 +234,7 @@ with st.sidebar.expander("DB Debug", expanded=True):
     st.write("Rows:", conn.query("select id, label, order_num from artist_progress order by order_num asc limit 20", ttl=0))
 
 
+
 with st.sidebar:
     st.header("➕ Sanatçı ekle")
 
