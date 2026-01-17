@@ -228,7 +228,7 @@ if "artist_sort_key_v" not in st.session_state:
 
 data = load_data()
 with st.sidebar.expander("DB Debug", expanded=True):
-    conn = st.connection("get_conn()")
+    conn = get_conn()
     st.write("Ping:", conn.query("select 1 as ok", ttl=0))
     st.write("Count:", conn.query("select count(*) as c from artist_progress", ttl=0))
     st.write("Rows:", conn.query("select id, label, order_num from artist_progress order by order_num asc limit 20", ttl=0))
