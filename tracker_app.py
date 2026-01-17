@@ -221,6 +221,12 @@ if "artist_sort_key_v" not in st.session_state:
     st.session_state["artist_sort_key_v"] = 0
 
 data = load_data()
+with st.sidebar.expander("DB Debug", expanded=True):
+    conn = st.connection("postgresql", type="sql")
+    st.write("Ping:", conn.query("select 1 as ok", ttl=0))
+    st.write("Count:", conn.query("select count(*) as c from artist_progress", ttl=0))
+    st.write("Rows:", conn.query("select id, label, order_num from artist_progress order by order_num asc limit 20", ttl=0))
+
 
 with st.sidebar:
     st.header("➕ Sanatçı ekle")
